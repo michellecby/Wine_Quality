@@ -1,0 +1,268 @@
+---
+title: "R Notebook"
+author: Michelle Cui and Sixian Ju
+output:
+  pdf_document: 
+    toc: yes
+  html_notebook: 
+    toc: yes
+---
+
+```{r, message=FALSE}
+library(readr)
+library(tidyverse)
+library(caret)
+library(ggplot2)
+library(pROC)
+library(MASS)
+library(leaps)
+library(egg)
+library(glmnet)
+library(plotmo)
+library(tree)
+library(randomForest)
+library(gbm)
+```
+
+
+```{r message=FALSE}
+wine <- read_delim("winequality-white.csv", delim = ";", escape_double = FALSE, trim_ws = TRUE)
+colnames(wine) <- c("fixed_ac", "volatile_ac", "citric_ac", "residual_sugar", "chloride", "free_so2", "total_so2", "density", "ph", "sulphates", "alcohol", "quality")
+wine.quality <- wine %>% 
+  mutate(excellent = case_when(quality <= 6 ~ FALSE, 
+                          quality > 6 ~ TRUE))
+wine.quality$excellent <- as.factor(wine.quality$excellent)
+#split test and training
+wine.q <- wine.quality %>%
+  mutate(quality = ifelse(wine$quality <= 5, "poor", 
+                          ifelse(wine$quality <= 7, "average", "excellent" )))
+
+set.seed(0)
+n_all <- nrow(wine)
+tr_ind <- sample(n_all, round(n_all/2))
+wine_train <- wine.q[tr_ind, ]
+wine_test <- wine.q[-tr_ind, ]
+colnames(wine_test)[13] <- "excellent"
+colnames(wine_train)[13] <- "excellent"
+fit_std <- preProcess(wine_train, method = "scale")
+wine_train <- predict(fit_std, newdata = wine_train )
+wine_test <- predict(fit_std, newdata = wine_test)
+wine_train$quality <- as.factor(wine_train$quality)
+wine_test$quality <- as.factor(wine_test$quality)
+##scale
+wine_sc <- rbind(wine_train, wine_test)
+
+```
+
+
+
+# 1. Logistic Regression
+## train data 
+```{r}
+glmod.train <- glm(excellent ~.-quality, wine_train, family = "binomial")
+summary(glmod.train)
+```
+
+## errors for logistic regression
+```{r}
+pred_exl_train <- predict(glmod.train, newdata = wine_train, type = "response")
+exl_train_label <- ifelse(pred_exl_train > 0.5, TRUE, FALSE)
+table(predict = exl_train_label, train = wine_train$excellent)
+train_error_exl <- mean(exl_train_label != wine_train$excellent)
+pred_exl_test <- predict(glmod.train, newdata = wine_test, type = "response")
+exl_test_label <- ifelse(pred_exl_test > 0.5, TRUE, FALSE)
+table(predict = exl_test_label, test = wine_test$excellent)
+test_error_exl <- mean(exl_test_label != wine_test$excellent)
+```
+  Our train error for logistic regression is `r train_error_exl`. And test error is `r test_error_exl`.
+
+# 2. LDA and QDA
+```{r}
+## LDA
+fit_lda <- lda(excellent ~. -quality, wine_train)
+### train error
+lda.train.pred <- predict(fit_lda, newdata = wine_train)
+lda.train.pred.class <- lda.train.pred$class
+lda.train.error <- mean(lda.train.pred.class != wine_train$excellent)
+### test error
+lda.test.pred <- predict(fit_lda, newdata = wine_test)
+lda.test.pred.class <- lda.test.pred$class
+lda.test.error <- mean(lda.test.pred.class != wine_test$excellent)
+
+## QDA
+fit_qda <- qda(excellent ~. -quality, wine_train)
+### training error
+qda.train.pred <- predict(fit_qda, newdata = wine_train)
+qda.train.pred.class <- qda.train.pred$class
+qda.train.error <- mean(qda.train.pred.class != wine_train$excellent)
+### testing error
+qda.test.pred <- predict(fit_qda, newdata = wine_test)
+qda.test.pred.class <- qda.test.pred$class
+qda.test.error <- mean(qda.test.pred.class != wine_test$excellent)
+```
+
+|type      |train error  | test error|
+|----------|-------------|-----------|
+|LDA      |`r lda.train.error`|`r lda.test.error`|
+|QDA        |`r qda.train.error`|`r qda.test.error`|
+
+
+# 3. KNN for classification
+```{r}
+k_seq <- c(1:50)
+train_error_seq <- test_error_seq <- NULL
+for (i in seq_along(k_seq)) {
+  k <- k_seq[i]
+  fit_knn <- knn3(excellent ~. -quality, wine_train, k = k)
+  pred_knn_train <- predict(fit_knn, newdata = wine_train, type = "class")
+  train_error_seq[i] <- mean(pred_knn_train != wine_train$excellent)
+  test <- predict(fit_knn, newdata = wine_test, type = "class")
+  test_error_seq[i] <- mean(test != wine_test$excellent)
+}
+
+knn_df <- rbind(data.frame(K = k_seq, error = train_error_seq, type = "train"),
+                data.frame(K = k_seq, error = test_error_seq, type = "test"))
+ggplot(knn_df, mapping = aes(x = K, y = error, color = type)) +
+  geom_point(size = 2) +
+  geom_line(size = 2)
+```
+
+# 4. Classification and Receiver Operating Characteristics(ROC) curves and AUC
+
+```{r message=FALSE}
+### auc_lda
+pred_lda <- predict(fit_lda)$posterior[,2]
+roc_lda <- roc(wine_train$excellent, pred_lda)
+auc_lda <- auc(roc_lda)
+### auc_qda
+pred_qda <- predict(fit_qda)$posterior[,2]
+roc_qda <- roc(wine_train$excellent, pred_qda)
+auc_qda <- auc(roc_qda)
+### logistic regression
+roc_logi <- roc(wine_train$excellent, pred_exl_train)
+auc_logi <- auc(roc_logi)
+### knn
+fit_knn <- knn3(excellent ~. -quality, wine_train, k = 16, prob = TRUE)
+pred_knn <- predict(fit_knn, newdata = wine_train, type = "prob")
+roc_knn <- roc(wine_train$excellent, pred_knn[,2])
+auc_knn <- auc(roc_knn)
+
+rocobj <- list(Logistic = roc_logi, LDA = roc_lda, QDA = roc_qda, KNN = roc_knn)
+methods_auc <- paste(c("Logistic", "LDA", "QDA", "KNN"), "AUC = ",
+                     round(c(auc_logi, auc_lda, auc_qda, auc_knn), 3))
+ggroc(rocobj, size = 2, alpha = 0.5) +
+  scale_color_discrete(labels = methods_auc)
+```
+
+
+# 5. tree
+## decision tree
+```{r}
+fit.tree <- tree(quality ~ fixed_ac + volatile_ac + citric_ac + residual_sugar + chloride + free_so2 + total_so2 + density + ph + sulphates + alcohol, data = wine_sc, subset = tr_ind)
+set.seed(0)
+cv.type <- cv.tree(fit.tree)
+
+plot(fit.tree)
+text(fit.tree)
+```
+
+## prune tree
+```{r}
+(bestsize_tree_type <- cv.type$size[which.min(cv.type$dev)])
+prune_type <- prune.tree(fit.tree, best = bestsize_tree_type)
+
+plot(prune_type)
+text(prune_type)
+```
+
+
+## errors for prune tree
+```{r}
+##prune
+### training error
+pred_type_train <- predict(prune_type, newdata = wine_train, type = "class")
+prune.train.error <- mean(pred_type_train != wine_train$quality)
+### test error
+pred_type_test <- predict(prune_type, newdata = wine_test, type = "class")
+prune.test.error <- mean(pred_type_test != wine_test$quality)
+```
+
+
+## bagging
+```{r}
+p <- ncol(wine.quality) - 1
+bag_fit <- randomForest(quality ~ fixed_ac + volatile_ac + citric_ac + residual_sugar + chloride + free_so2 + total_so2 + density + ph + sulphates + alcohol, data = wine_train, mtry = p, importance = TRUE)
+
+bag_fit
+importance(bag_fit)
+varImpPlot(bag_fit)
+```
+
+## errors for bagging
+```{r}
+##bagging
+### training error
+train.bag.type <- predict(bag_fit, newdata = wine_train, type = "class")
+bag.train.error <- mean(train.bag.type != wine_train$quality)
+### test error
+test.bag.type <- predict(bag_fit, newdata = wine_test)
+bag.test.error <- mean(test.bag.type != wine_test$quality)
+```
+
+## random forest
+```{r}
+set.seed(0)
+rf.type <- randomForest(quality ~ fixed_ac + volatile_ac + citric_ac + residual_sugar + chloride + free_so2 + total_so2 + density + ph + sulphates + alcohol, data = wine_train, importance = TRUE)
+rf.type
+
+importance(rf.type)
+varImpPlot(rf.type)
+```
+
+## errors for random forest
+```{r}
+#random forest
+### training error
+train.rf.type <- predict(rf.type, newdata = wine_train)
+rf.train.error <- mean(train.rf.type != wine_train$quality)
+### test error
+test.rf.type <- predict(rf.type, newdata = wine_test)
+rf.test.error <- mean(test.rf.type != wine_test$quality)
+```
+
+## boosting
+```{r}
+wine_tr <- wine_train %>%
+  mutate(excellent = ifelse(wine_train$excellent == "TRUE", 1, 0))
+set.seed(0)
+boost.type <- gbm(excellent ~ fixed_ac + volatile_ac + citric_ac + residual_sugar + chloride + free_so2 + total_so2 + density + ph + sulphates + alcohol, data = wine_tr, 
+                   distribution = "bernoulli", n.trees = 5000, 
+                   interaction.depth = 1, cv.folds = 5, shrinkage = 0.2)
+best_n_type <- which.min(boost.type$cv.error)
+summary(boost.type)
+```
+
+## errors for boosting
+```{r echo=FALSE}
+#boosting
+### training error
+train.prob.type <- predict(boost.type, newdata = wine_train, n.trees = best_n_type, type = "response")
+train.boost.type <- ifelse(train.prob.type > 0.5, TRUE, FALSE)
+boosting.train.error <- mean(train.boost.type != wine_train$excellent)
+## test error
+test.prob.type <- predict(boost.type, newdata = wine_test, n.trees = best_n_type, type = "response")
+test.boost.type <- ifelse(test.prob.type > 0.5, TRUE, FALSE)
+boosting.test.error <- mean(test.boost.type != wine_test$excellent)
+```
+
+|type      |train error  | test error|
+|----------|-------------|-----------|
+|logistic regression|`r train_error_exl`|`r test_error_exl`|
+|knn(16)        |`r knn_df[16,2]`|`r knn_df[66,2]`|
+|LDA            |`r lda.train.error`|`r lda.test.error`|
+|QDA            |`r qda.train.error`|`r qda.test.error`|
+|prune      |`r prune.train.error`|`r prune.test.error`|
+|bagging        |`r bag.train.error`|`r bag.test.error`|
+|random forest|`r rf.train.error`|`r rf.test.error`|
+|boosting|`r boosting.train.error`|`r boosting.test.error`|
+
